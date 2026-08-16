@@ -99,7 +99,7 @@ def _selftest(store: core.IndexStore) -> None:
         print("ERROR:", r["error"])
     else:
         print(r["title"], f"({r['chars']} chars)")
-        print("\n".join(r["text"].splitlines()[:12]))
+        print(r["text"])
 
     print("\n--- list_sections() ---")
     r = store.list_sections()

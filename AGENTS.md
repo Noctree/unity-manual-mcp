@@ -73,9 +73,10 @@ count. `--selftest` reports **stale** (db file missing) and **orphaned**
   (index progress, errors) to **stderr** — see `IndexStore._log`. Never `print`
   to stdout in the server path. The `_selftest` runner does print, but it only
   runs under `--selftest`, never during `mcp.run(...)`.
-- **The index build is slow** (~12 min; ~48k files; extraction fanned out over
-  8 threads, inserted in batches). Don't trigger a fresh build in quick
-  iterations — rely on the cache. The background build is guarded by
+- **The index build takes a few minutes** (~48k files; extraction is pure
+  Python/GIL-bound and is fanned out over 8 worker *processes*, not threads;
+  inserts happen in batches on the main thread). Don't trigger a fresh build
+  in quick iterations — rely on the cache. The background build is guarded by
   `wait_ready(timeout=900)`; `--rebuild` deletes the db to force it.
 - **Windows file locks:** adopting a cached db uses `os.replace` with a
   `shutil.copy2` fallback (a locked db can't be renamed but can be read). Don't

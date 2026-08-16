@@ -9,6 +9,7 @@ Dependencies: beautifulsoup4 (+ lxml parser, optional but much faster).
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import html as html_mod
 import json
@@ -20,7 +21,7 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 try:
@@ -92,19 +93,15 @@ def _require_bs4():
 
 def make_soup(html_text: str):
     _require_bs4()
-    last_err = None
-    for parser in ("lxml", "html.parser"):
-        try:
-            return BeautifulSoup(html_text, parser)
-        except Exception as e:  # FeatureNotFound if lxml missing
-            last_err = e
-    raise RuntimeError(f"Could not parse HTML: {last_err}")
+    try:
+        return BeautifulSoup(html_text, "lxml")
+    except Exception:
+        return BeautifulSoup(html_text, "html.parser")
 
 
 def _strip_boilerplate(soup):
-    for sel in BOILERPLATE_SELECTORS:
-        for el in soup.select(sel):
-            el.decompose()
+    for el in soup.select(", ".join(BOILERPLATE_SELECTORS)):
+        el.decompose()
     for el in soup.find_all("known_issues"):
         el.decompose()
 
@@ -113,19 +110,64 @@ _CONTAINER_SELECTORS = ("#content-wrap", ".content-wrap", ".content-block")
 _IDENT_BONUS = re.compile(r"\b(content|article|entry|body|main|section|subsection)\b")
 
 
-def _node_score(el) -> float:
+def _precompute_scores(root):
+    """One bottom-up pass computing per-node (chars, pieces, uplink, upsum).
+
+    chars/pieces  -> the article's text as get_text(" ", strip=True) would join
+                     it (chars = sum of stripped fragment lengths, pieces = count
+                     of non-empty fragments; ln = chars + pieces - 1).
+    uplink/upsum  -> sum of that text's length over <a>/<p> elements in the
+                     subtree, INCLUDING the node itself if it is an <a>/<p>.
+
+    These are additive over the subtree, so this single O(n) traversal replaces
+    the per-element get_text / find_all walks the old _node_score did, which made
+    the article-node search quadratic in DOM size.
+    """
+    cache = {}
+    order = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        order.append(node)
+        for ch in node.children:
+            if not isinstance(ch, NavigableString):
+                stack.append(ch)
+    for node in reversed(order):
+        chars = pieces = uplink = upsum = 0
+        for ch in node.children:
+            if isinstance(ch, NavigableString):
+                t = str(ch).strip()
+                if t:
+                    chars += len(t)
+                    pieces += 1
+            else:
+                c, p, l, ps = cache[id(ch)]
+                chars += c
+                pieces += p
+                uplink += l
+                upsum += ps
+        ln = chars + (pieces - 1) if pieces else 0
+        if node.name == "a":
+            uplink += ln
+        if node.name == "p":
+            upsum += ln
+        cache[id(node)] = (chars, pieces, uplink, upsum)
+    return cache
+
+
+def _node_score(el, cache) -> float:
     """Readability-style score: text length, link-density penalty, name bonus."""
-    txt = el.get_text(" ", strip=True)
-    ln = len(txt)
+    chars, pieces, uplink, upsum = cache[id(el)]
+    ln = chars + (pieces - 1) if pieces else 0
     if ln < 50:
         return -1.0
-    link_txt = "".join(a.get_text(" ", strip=True) for a in el.find_all("a"))
-    density = (ln - len(link_txt)) / ln
-    score = ln * density
+    link = uplink - (ln if el.name == "a" else 0)
+    psum = upsum - (ln if el.name == "p" else 0)
+    score = ln - link
     ident = ((el.get("id") or "") + " " + " ".join(el.get("class", []) or [])).lower()
     if _IDENT_BONUS.search(ident):
         score += 150.0
-    score += sum(len(p.get_text(" ", strip=True)) for p in el.find_all("p")) * 0.25
+    score += psum * 0.25
     return score
 
 
@@ -139,9 +181,10 @@ def _find_article_node(soup):
             break
     if container is None:
         container = soup.body if soup.body is not None else soup
-    best, best_score = container, _node_score(container)
+    cache = _precompute_scores(container)
+    best, best_score = container, _node_score(container, cache)
     for el in container.find_all(True):
-        s = _node_score(el)
+        s = _node_score(el, cache)
         if s > best_score:
             best, best_score = el, s
     return best
@@ -153,6 +196,26 @@ _HEADING_RE = re.compile(r"^h([1-6])$")
 def _clean_inline(el) -> str:
     t = html_mod.unescape(el.get_text(" ", strip=True))
     return re.sub(r"\s+", " ", t)
+
+
+_PRE_INLINE_TAGS = ("a", "code", "span", "em", "strong", "b", "i", "u", "sub", "sup", "font", "kbd")
+
+
+def _pre_text(node) -> str:
+    """Verbatim code text from a ``<pre>`` block.
+
+    Unity code blocks hold line breaks in real newlines AND ``<br>`` tags, and
+    wrap identifiers in inline ``<a>`` links; a plain ``get_text(" ")`` with a
+    separator would put every linked identifier on its own line. So: ``<br>``
+    becomes a newline, inline tags are unwrapped, and the text is read with no
+    separator.
+    """
+    clone = copy.deepcopy(node)
+    for br in clone.find_all("br"):
+        br.replace_with("\n")
+    for tag in clone.find_all(_PRE_INLINE_TAGS):
+        tag.unwrap()
+    return html_mod.unescape(clone.get_text()).strip("\n")
 
 
 def _convert_node(node, lines: list[str]) -> None:
@@ -169,7 +232,7 @@ def _convert_node(node, lines: list[str]) -> None:
             lines.append("")
         return
     if name == "pre":
-        code = html_mod.unescape(node.get_text("\n")).strip("\n")
+        code = _pre_text(node)
         if code.strip():
             lines.append("```")
             lines.extend(code.splitlines())
@@ -264,6 +327,17 @@ def extract_article(path: Path, docs_root: Path) -> tuple[str, str]:
     if not title:
         title = path.stem
     return title, text
+
+
+def _extract_worker(args: tuple[Path, Path]) -> tuple[str, str, str, str]:
+    """Extract one file. Module-level so the index build can farm work to a
+    process pool (bs4's extraction is pure Python; threads would serialize
+    under the GIL)."""
+    docs_root, path = args
+    rel = path.relative_to(docs_root).as_posix()
+    kind = "manual" if rel.startswith("Manual/") else "api"
+    title, text = extract_article(path, docs_root)
+    return (rel, kind, title, text)
 
 
 # ---------------------------------------------------------------------------
@@ -396,20 +470,18 @@ class IndexStore:
     def _check_db(self, db_path: Path) -> bool:
         """True if this db file is valid for the current docs tree."""
         try:
-            stats = self._scan_stats()
+            count = self._count_html()
             with sqlite3.connect(db_path) as conn:
                 row = conn.execute("SELECT value FROM meta WHERE key='file_count'").fetchone()
-            return row is not None and int(row[0]) == stats[0]
+            return row is not None and int(row[0]) == count
         except Exception:
             return False
 
     def _is_valid(self) -> bool:
         return self.db_path.exists() and self._check_db(self.db_path)
 
-    def _scan_stats(self) -> tuple[int, int]:
-        """(html file count, total bytes) across the content dirs."""
-        count = 0
-        size = 0
+    def _iter_html(self):
+        """Yield every content HTML file path in a single pass over both dirs."""
         for d in CONTENT_DIRS:
             base = self.docs_root / d
             if not base.is_dir():
@@ -418,26 +490,11 @@ class IndexStore:
                 rp = Path(root)
                 for f in files:
                     if f.endswith(".html"):
-                        count += 1
-                        try:
-                            size += (rp / f).stat().st_size
-                        except OSError:
-                            pass
-        return count, size
+                        yield rp / f
 
-    def _list_html_files(self) -> list[Path]:
-        files: list[Path] = []
-        for d in CONTENT_DIRS:
-            base = self.docs_root / d
-            if base.is_dir():
-                files.extend(p for p in base.rglob("*.html") if p.is_file())
-        return sorted(files)
-
-    def _extract_one(self, path: Path) -> tuple[str, str, str, str]:
-        rel = path.relative_to(self.docs_root).as_posix()
-        kind = "manual" if rel.startswith("Manual/") else "api"
-        title, text = extract_article(path, self.docs_root)
-        return (rel, kind, title, text)
+    def _count_html(self) -> int:
+        """Number of content HTML files (no per-file stat; cheap for validation)."""
+        return sum(1 for _ in self._iter_html())
 
     def _log(self, msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)
@@ -446,17 +503,35 @@ class IndexStore:
         t0 = time.time()
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            files = self._list_html_files()
+            # single pass over the tree: collect (rel, path, size) for every html file
+            paths = list(self._iter_html())
+            entries = []
+            for p in paths:
+                try:
+                    sz = p.stat().st_size
+                except OSError:
+                    continue  # unreadable entry; skip indexing it
+                entries.append((p.relative_to(self.docs_root).as_posix(), p, sz))
+            entries.sort(key=lambda e: e[0])
+            files = [p for _rel, p, _sz in entries]
+            count = len(paths)  # by-name count, matches _count_html for validation
+            total_bytes = sum(sz for _rel, _p, sz in entries)
             if self.db_path.exists():
                 self.db_path.unlink()
             conn = sqlite3.connect(self.db_path)
+            conn.execute("PRAGMA journal_mode=MEMORY")
+            conn.execute("PRAGMA synchronous=OFF")
             conn.executescript(SCHEMA)
             batch: list[tuple] = []
             done = 0
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                for row in pool.map(self._extract_one, files, chunksize=16):
+            with ProcessPoolExecutor(max_workers=8) as pool:
+                for row in pool.map(
+                    _extract_worker,
+                    ((self.docs_root, p) for p in files),
+                    chunksize=32,
+                ):
                     batch.append(row)
-                    if len(batch) >= 1000:
+                    if len(batch) >= 2500:
                         conn.executemany(
                             "INSERT OR REPLACE INTO pages(path,kind,title,text) VALUES (?,?,?,?)",
                             batch,
@@ -469,9 +544,8 @@ class IndexStore:
                     "INSERT OR REPLACE INTO pages(path,kind,title,text) VALUES (?,?,?,?)",
                     batch,
                 )
-            count, size = self._scan_stats()
             conn.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("file_count", str(count)))
-            conn.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("total_bytes", str(size)))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("total_bytes", str(total_bytes)))
             conn.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("docs_root", str(self.docs_root)))
             conn.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("built_at", str(int(time.time()))))
             conn.commit()
