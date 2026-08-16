@@ -7,6 +7,7 @@ core.py for details.
 Usage:
     python server.py "C:\\Program Files\\Unity\\Hub\\Editor\\<ver>\\Editor\\Data\\Documentation\\en"
     python server.py --selftest <docs path>
+    python server.py --rebuild <docs path>
     python server.py --prune
 
 The docs path may also come from the UNITY_DOCS_PATH environment variable.
@@ -135,7 +136,7 @@ def main() -> None:
     ap.add_argument(
         "--rebuild",
         action="store_true",
-        help="Force rebuilding the search index",
+        help="Rebuild the search index and exit (no MCP server)",
     )
     ap.add_argument(
         "--prune",
@@ -160,6 +161,16 @@ def main() -> None:
 
     global _store
     _store = core.IndexStore(docs_root, rebuild=args.rebuild)
+
+    if args.rebuild:
+        t0 = time.time()
+        try:
+            _store.wait_ready()
+        except RuntimeError as e:
+            raise SystemExit(f"Index rebuild failed: {e}")
+        print(f"Rebuilt index in {time.time() - t0:.1f}s -> {_store.db_path}")
+        if not args.selftest:
+            return
 
     if args.selftest:
         _selftest(_store)
