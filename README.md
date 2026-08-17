@@ -23,9 +23,12 @@ count changes.
 
 ## Setup
 
-```powershell
-uv sync
-```
+- Clone the repository
+- Open a terminal inside the cloned repository
+- Run
+  ```powershell
+  uv sync
+  ```
 
 Creates `.venv` and installs the dependencies from `pyproject.toml`.
 
