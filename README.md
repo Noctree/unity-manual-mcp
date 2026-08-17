@@ -1,7 +1,8 @@
 # Unity Manual MCP
 
-Local MCP server (stdio) that serves a Unity documentation install — the
-`en` folder from a Unity editor's `Data\Documentation` directory — to Claude.
+Local MCP server (stdio) that serves a local Unity documentation install to your AI assistant.
+
+The documentation folder is usually located in your Unity Editors install directory, under `Data\Documentation\en`.
 
 - **`Manual/`** — how-to articles, organized in chapters (~3.5k pages)
 - **`ScriptReference/`** — full scripting API reference, one page per
@@ -15,26 +16,23 @@ count changes.
 
 ## Requirements
 
-- [uv](https://docs.astral.sh/uv/) (or pip)
-- Python 3.10+ — required by `fastmcp` 3.x. uv will reuse any Python
-  already installed that meets this and only download a new one if no
-  compatible interpreter exists.
+- [uv](https://docs.astral.sh/uv/)
+- Python 3.10+ — declared in `pyproject.toml` (required by `fastmcp` 3.x).
+  uv reuses any already-installed Python that meets this and only downloads
+  a new one if no compatible interpreter exists.
 
 ## Setup
 
 ```powershell
-uv venv venv --python ">=3.10,<4"
-uv pip install -r requirements.txt
+uv sync
 ```
 
-`--python ">=3.10,<4"` is a version range, not a pinned version, so uv
-uses whatever Python 3.10+ you already have (system-installed or
-previously downloaded by uv) instead of fetching a specific one.
+Creates `.venv` and installs the dependencies from `pyproject.toml`.
 
 ## Run
 
 ```powershell
-venv\Scripts\python server.py "C:\Program Files\Unity\Hub\Editor\<ver>\Editor\Data\Documentation\en"
+uv run server.py "C:\Program Files\Unity\Hub\Editor\<ver>\Editor\Data\Documentation\en"
 ```
 
 The `en` folder is auto-detected if you point at `...\Documentation` or
@@ -47,8 +45,27 @@ Flags:
 - `--rebuild` — force rebuilding the index
 - `--prune` — drop stale cache entries (db file missing) from the manifest
 - `UNITY_DOCS_PATH` env var — alternative to the positional argument
+  <br>
+> ℹ Run the server manually once after a fresh install to pre-index the docs and avoid waiting during first use
+> ```powershell
+> uv run server.py --selftest "C:\Program Files\Unity\Hub\Editor\<ver>\Editor\Data\Documentation\en"
+> ```
 
-## Claude Desktop
+## Adding the MCP Server
+
+This is a stdio server, so any client that can launch a local process works.
+Each client runs the same command:
+
+```text
+uv run --directory "<repo>" server.py "<docs path>"
+```
+
+where `<repo>` is this repo's folder and `<docs path>` is your Unity docs
+`en` folder (auto-detected if you point at `...\Documentation` or
+`...\Editor\Data` instead). `uv run` creates and syncs the `.venv`
+environment automatically, so the client only needs uv on the PATH.
+
+### Claude Desktop
 
 `claude_desktop_config.json` (substitute your own paths):
 
@@ -56,20 +73,49 @@ Flags:
 {
   "mcpServers": {
     "unity-manual": {
-      "command": "<path to this repo>\\venv\\Scripts\\python.exe",
-      "args": [
-        "<path to this repo>\\server.py",
-        "C:\\Program Files\\Unity\\Hub\\Editor\\<ver>\\Editor\\Data\\Documentation\\en"
-      ]
+      "command": "uv",
+      "args": ["run", "--directory", "<repo>", "server.py", "<docs path>"]
     }
   }
 }
 ```
 
-## Claude Code
+### Claude Code
 
 ```powershell
-claude mcp add unity-manual -- venv\Scripts\python.exe server.py "C:\Program Files\Unity\Hub\Editor\<ver>\Editor\Data\Documentation\en"
+claude mcp add unity-manual -- uv run --directory "<repo>" server.py "<docs path>"
+```
+
+### OpenCode
+
+`opencode.json` in the project, or the global config
+(`~/.config/opencode/opencode.json`):
+
+```json
+{
+  "mcp": {
+    "unity-manual": {
+      "type": "local",
+      "command": ["uv", "run", "--directory", "<repo>", "server.py", "<docs path>"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Codex
+
+```powershell
+codex mcp add unity-manual -- uv run --directory "<repo>" server.py "<docs path>"
+```
+
+Or edit `~/.codex/config.toml` (shared with the ChatGPT desktop app and IDE
+extension; a project-scoped `.codex/config.toml` works in trusted projects):
+
+```toml
+[mcp_servers.unity-manual]
+command = "uv"
+args = ["run", "--directory", "<repo>", "server.py", "<docs path>"]
 ```
 
 ## Tools
@@ -92,8 +138,6 @@ reuses the cached index; it is validated by HTML file count. Delete a db file
 (db file missing) and **orphaned** entries (docs folder gone, db still there);
 `--prune` drops the stale ones.
 
-## Distributing
+### Credits
 
-This is a local-stdio server, which is fine for personal use. If you later
-want to ship it to others, repackage it as an **MCPB** (bundled local server
-with runtime) — the stdio server can be bundled as-is.
+Fully written by Qwen 3.8 27b 🙂

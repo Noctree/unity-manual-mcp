@@ -1,0 +1,13 @@
+[project]
+name = "unity-manual-mcp"
+version = "0.1.0"
+description = "Local stdio MCP server serving a Unity documentation install"
+requires-python = ">=3.10"
+dependencies = [
+  "fastmcp>=3.0,<4",
+  "beautifulsoup4>=4.12",
+  "lxml>=5.0",
+]
+
+[tool.uv]
+package = false

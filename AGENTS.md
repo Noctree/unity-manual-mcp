@@ -25,24 +25,26 @@ repeated starts are instant.
   argparse CLI (`--selftest`, `--rebuild`, `--prune`), and the `_selftest`
   runner. `mcp = FastMCP(...)` is at module level; `main()` sets the global
   `_store` before `mcp.run(transport="stdio")`.
-- **`requirements.txt`** — `fastmcp>=3,<4`, `beautifulsoup4`, `lxml`.
+- **`pyproject.toml` + `uv.lock`** — uv project (`[tool.uv] package = false`;
+  no build step). Deps: `fastmcp>=3,<4`, `beautifulsoup4`, `lxml`;
+  `requires-python = ">=3.10"`.
 
 Keep the split: anything that can run without MCP belongs in `core.py`.
 `server.py` should stay a thin wrapper.
 
 ## Running
 
-The venv is `venv`, created with **uv** (not pip). Use `venv\Scripts\python`.
+It's a uv project: `.venv` is the env, managed by `uv sync` / `uv run`.
 
 ```powershell
 # one-time index build + sample queries, then exit (no server); ~12 min on a fresh cache
-venv\Scripts\python server.py --selftest "C:\Program Files\Unity\Hub\Editor\<ver>\Editor\Data\Documentation\en"
+uv run server.py --selftest "C:\Program Files\Unity\Hub\Editor\<ver>\Editor\Data\Documentation\en"
 
-# the MCP server itself (stdio; Claude Desktop / Claude Code spawn this)
-venv\Scripts\python server.py "C:\...\Editor\Data\Documentation\en"
+# the MCP server itself (stdio; MCP clients spawn this via `uv run --directory <repo> server.py`)
+uv run server.py "C:\...\Editor\Data\Documentation\en"
 
 # drop stale manifest entries (db file missing) and exit
-venv\Scripts\python server.py --prune
+uv run server.py --prune
 ```
 
 The docs path may be the `en` folder, or a wrapper (`Documentation` or
@@ -93,4 +95,5 @@ count. `--selftest` reports **stale** (db file missing) and **orphaned**
 
 - Never `git commit` — stage and report; the user commits.
 - Never start the MCP (or other) servers — the user runs and manages them.
-- Never install packages without asking — deps are in `requirements.txt`.
+- Never install packages without asking — deps are in `pyproject.toml`
+  (uv project; `uv sync` / `uv run`).
